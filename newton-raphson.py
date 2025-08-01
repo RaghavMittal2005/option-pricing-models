@@ -1,61 +1,57 @@
 import numpy as np
-import scipy.stats as st
-# Initial parameters and market quotes
-V_market = 2    # market call option price
-K        = 120  # strike
-tau      = 1    # time-to-maturity
-r        = 0.05 # interest rate
-S_0      = 100  # today's stock price
-sigmaInit    = 0.25  # Initial implied volatility
-CP       ="c" #C is call and P is put
+from scipy.stats import norm
 
-def ImpliedVolatility(CP,S_0,K,sigma,tau,r):
-    error    = 1e10; # initial error
-    #Handy lambda expressions
-    optPrice = lambda sigma: BS_Call_Option_Price(CP,S_0,K,sigma,tau,r)
-    vega= lambda sigma: dV_dsigma(S_0,K,sigma,tau,r)
-    
-    # While the difference between the model and the arket price is large
-    # follow the iteration
-    n = 1.0 
-    while error>10e-10:
-        g         = optPrice(sigma) - V_market
-        g_prim    = vega(sigma)
-        sigma_new = sigma - g / g_prim
-    
-        #error=abs(sigma_new-sigma)
-        error=abs(g)
-        sigma=sigma_new
-        
-        print('iteration {0} with error = {1}'.format(n,error))
-        
-        n= n+1
-    return sigma
+# ---------- Black-Scholes (for testing) ----------
+def bs_price(S0, K, T, r, sigma, option="call"):
+    d1 = (np.log(S0/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    if option == "call":
+        return norm.cdf(d1)*S0 - norm.cdf(d2)*K*np.exp(-r*T)
+    else: # put
+        return norm.cdf(-d2)*K*np.exp(-r*T) - norm.cdf(-d1)*S0
 
-# Vega, dV/dsigma
-def dV_dsigma(S_0,K,sigma,tau,r):
-    #parameters and value of Vega
-    d2   = (np.log(S_0 / float(K)) + (r - 0.5 * np.power(sigma,2.0)) * tau) / float(sigma * np.sqrt(tau))
-    value = K * np.exp(-r * tau) * st.norm.pdf(d2) * np.sqrt(tau)
-    return value
+def bs_vega(S0, K, T, r, sigma):
+    d1 = (np.log(S0/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+    return S0 * norm.pdf(d1) * np.sqrt(T)
 
-def BS_Call_Option_Price(CP,S_0,K,sigma,tau,r):
-    #Black-Scholes Call option price
-    d1    = (np.log(S_0 / float(K)) + (r + 0.5 * np.power(sigma,2.0)) * tau) / float(sigma * np.sqrt(tau))
-    d2    = d1 - sigma * np.sqrt(tau)
-    if str(CP).lower()=="c" or str(CP).lower()=="1":
-        value = st.norm.cdf(d1) * S_0 - st.norm.cdf(d2) * K * np.exp(-r * tau)
-    elif str(CP).lower()=="p" or str(CP).lower()=="-1":
-        value = st.norm.cdf(-d2) * K * np.exp(-r * tau) - st.norm.cdf(-d1)*S_0
-    return value
+# ---------- Generic implied volatility solver ----------
+def implied_volatility(pricer, S0, K, T, r, market_price,
+                       option="call", sigma_init=0.2, tol=1e-8, max_iter=100,
+                       analytic_vega=None, **kwargs):
+    """
+    Implied volatility via Newton-Raphson.
 
-sigma_imp = ImpliedVolatility(CP,S_0,K,sigmaInit,tau,r)
-message = '''Implied volatility for CallPrice= {}, strike K={}, 
-      maturity T= {}, interest rate r= {} and initial stock S_0={} 
-      equals to sigma_imp = {:.7f}'''.format(V_market,K,tau,r,S_0,sigma_imp)
-            
-print(message)
+    Parameters:
+        pricer        : function(S0,K,T,r,sigma,option=...,**kwargs) -> price
+        S0,K,T,r      : option parameters
+        market_price  : observed option price
+        option        : "call" or "put"
+        sigma_init    : starting volatility
+        tol           : tolerance
+        max_iter      : maximum iterations
+        analytic_vega : function(S0,K,T,r,sigma) -> vega (optional)
+        kwargs        : extra args for model (e.g. N, n_paths, rate, muJ, sigmaJ)
+    """
+    sigma = sigma_init
+    for i in range(max_iter):
+        price = pricer(S0, K, T, r, sigma, option=option, **kwargs)
+        diff = price - market_price
+        if abs(diff) < tol:
+            return sigma
 
-# Check! 
-val = BS_Call_Option_Price(CP,S_0,K,sigma_imp,tau,r)
-print('Option Price for implied volatility of {0} is equal to {1}'.format(sigma_imp, val))
+        # Use analytic vega if available, else numerical FD
+        if analytic_vega is not None:
+            vega = analytic_vega(S0, K, T, r, sigma)
+        else:
+            h = 1e-4
+            price_up = pricer(S0, K, T, r, sigma+h, option=option, **kwargs)
+            price_down = pricer(S0, K, T, r, sigma-h, option=option, **kwargs)
+            vega = (price_up - price_down) / (2*h)
+
+        # Guard against zero vega
+        if vega < 1e-8:
+            raise ValueError("Vega too small — Newton method fails.")
+
+        sigma -= diff / vega
+
+    raise ValueError("Implied volatility did not converge")
